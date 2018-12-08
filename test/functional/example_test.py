@@ -28,6 +28,7 @@ from test_framework.util import (
     connect_nodes,
     wait_until,
 )
+from test_framework.decorators import clean_chain, nodes, test_case
 
 # P2PInterface is a class containing callbacks to be executed when a P2P
 # message is received from the node-under-test. Subclass P2PInterface and
@@ -66,7 +67,6 @@ def custom_function():
     moving it to a module in test_framework."""
     # self.log.info("running custom_function")  # Oops! Can't run self.log outside the BitcoinTestFramework
     pass
-
 
 class ExampleTest(BitcoinTestFramework):
     # Each functional test is a subclass of the BitcoinTestFramework class.
@@ -209,6 +209,12 @@ class ExampleTest(BitcoinTestFramework):
         with mininode_lock:
             for block in self.nodes[2].p2p.block_receive_map.values():
                 assert_equal(block, 1)
+
+@test_case("Bare Function")
+@clean_chain()
+@nodes([], ["-logips"], [])
+def bare_test(t):
+    t.log.info("This is an example test")
 
 if __name__ == '__main__':
     ExampleTest().main()

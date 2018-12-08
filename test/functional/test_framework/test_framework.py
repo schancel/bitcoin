@@ -102,7 +102,16 @@ class BitcoinTestFramework(metaclass=BitcoinTestMetaClass):
 
         assert hasattr(self, "num_nodes"), "Test must set self.num_nodes in set_test_params()"
 
-    def main(self):
+    def main(self, args=None):
+        status = self.main_implementation(args)
+        if status == TestStatus.PASSED:
+            sys.exit(TEST_EXIT_PASSED)
+        if status == TestStatus.SKIPPED:
+            sys.exit(TEST_EXIT_SKIPPED)
+        if status == TestStatus.FAILED:
+            sys.exit(TEST_EXIT_FAILED)
+
+    def main_implementation(self, args=None):
         """Main function. This should not be overridden by the subclass test scripts."""
 
         parser = argparse.ArgumentParser(usage="%(prog)s [options]")
@@ -129,7 +138,7 @@ class BitcoinTestFramework(metaclass=BitcoinTestMetaClass):
         parser.add_argument("--usecli", dest="usecli", default=False, action="store_true",
                             help="use bitcoin-cli instead of RPC for all commands")
         self.add_options(parser)
-        self.options = parser.parse_args()
+        self.options = parser.parse_args(args)
 
         PortSeed.n = self.options.port_seed
 
@@ -210,18 +219,22 @@ class BitcoinTestFramework(metaclass=BitcoinTestMetaClass):
 
         if success == TestStatus.PASSED:
             self.log.info("Tests successful")
-            exit_code = TEST_EXIT_PASSED
         elif success == TestStatus.SKIPPED:
             self.log.info("Test skipped")
-            exit_code = TEST_EXIT_SKIPPED
         else:
             self.log.error("Test failed. Test logging available at %s/test_framework.log", self.options.tmpdir)
             self.log.error("Hint: Call {} '{}' to consolidate all logs".format(os.path.normpath(os.path.dirname(os.path.realpath(__file__)) + "/../combine_logs.py"), self.options.tmpdir))
-            exit_code = TEST_EXIT_FAILED
-        logging.shutdown()
+        
+        # Manually close our handlers as we may be sharing logging with another test.
+        # Otherwise we end up closing the entire logging package down.
+        handlers = logging._handlers.copy()
+        for handler in handlers:
+            self.log.removeHandler(handler)
+            handler.flush()
+            handler.close()
         if cleanup_tree_on_exit:
             shutil.rmtree(self.options.tmpdir)
-        sys.exit(exit_code)
+        return success
 
     # Methods to override in subclass test scripts.
     def set_test_params(self):
@@ -392,7 +405,7 @@ class BitcoinTestFramework(metaclass=BitcoinTestMetaClass):
 
     def _start_logging(self):
         # Add logger and logging handlers
-        self.log = logging.getLogger('TestFramework')
+        self.log = logging.getLogger(self.options.tmpdir)
         self.log.setLevel(logging.DEBUG)
         # Create file handler to log all messages
         fh = logging.FileHandler(self.options.tmpdir + '/test_framework.log', encoding='utf-8')

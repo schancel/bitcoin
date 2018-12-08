@@ -452,6 +452,8 @@ class NetworkThread(threading.Thread):
         wait_until(lambda: not self.network_event_loop.is_running(), timeout=timeout)
         self.network_event_loop.close()
         self.join(timeout)
+        # Clean up our network_event_loop incase other tests run in this process later
+        NetworkThread.network_event_loop = None
 
 
 class P2PDataStore(P2PInterface):
