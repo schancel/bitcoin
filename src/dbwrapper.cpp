@@ -178,12 +178,36 @@ bool CDBWrapper::HasKeyStartingWith(const fs::path& path, uint8_t prefix)
 }
 
 struct CDBBatch::WriteBatchImpl {
-    leveldb::WriteBatch batch;
+    virtual ~WriteBatchImpl() = default;
+    virtual void Clear() = 0;
+    virtual void Put(std::span<const std::byte> key, std::span<const std::byte> value) = 0;
+    virtual void Delete(std::span<const std::byte> key) = 0;
+    virtual size_t ApproximateSize() const = 0;
 };
+
+namespace {
+
+struct LevelDBBatchImpl final : CDBBatch::WriteBatchImpl {
+    leveldb::WriteBatch batch;
+
+    void Clear() override { batch.Clear(); }
+    void Put(std::span<const std::byte> key, std::span<const std::byte> value) override
+    {
+        batch.Put(leveldb::Slice(CharCast(key.data()), key.size()),
+                  leveldb::Slice(CharCast(value.data()), value.size()));
+    }
+    void Delete(std::span<const std::byte> key) override
+    {
+        batch.Delete(leveldb::Slice(CharCast(key.data()), key.size()));
+    }
+    size_t ApproximateSize() const override { return batch.ApproximateSize(); }
+};
+
+} // namespace
 
 CDBBatch::CDBBatch(const CDBWrapper& _parent)
     : parent{_parent},
-      m_impl_batch{std::make_unique<CDBBatch::WriteBatchImpl>()}
+      m_impl_batch{_parent.DBContext().NewBatch()}
 {
     m_key_scratch.reserve(DBWRAPPER_PREALLOC_KEY_SIZE);
     m_value_scratch.reserve(DBWRAPPER_PREALLOC_VALUE_SIZE);
@@ -194,33 +218,45 @@ CDBBatch::~CDBBatch() = default;
 
 void CDBBatch::Clear()
 {
-    m_impl_batch->batch.Clear();
+    m_impl_batch->Clear();
     assert(m_key_scratch.empty());
     assert(m_value_scratch.empty());
 }
 
 void CDBBatch::WriteImpl(std::span<const std::byte> key, DataStream& value)
 {
-    leveldb::Slice slKey(CharCast(key.data()), key.size());
     dbwrapper_private::GetObfuscation(parent)(value);
-    leveldb::Slice slValue(CharCast(value.data()), value.size());
-    m_impl_batch->batch.Put(slKey, slValue);
+    m_impl_batch->Put(key, value);
 }
 
 void CDBBatch::EraseImpl(std::span<const std::byte> key)
 {
-    leveldb::Slice slKey(CharCast(key.data()), key.size());
-    m_impl_batch->batch.Delete(slKey);
+    m_impl_batch->Delete(key);
 }
 
 size_t CDBBatch::ApproximateSize() const
 {
-    return m_impl_batch->batch.ApproximateSize();
+    return m_impl_batch->ApproximateSize();
 }
 
-struct LevelDBContext {
+struct DBContext {
+    virtual ~DBContext() = default;
+    virtual std::optional<std::string> Read(std::span<const std::byte> key) const = 0;
+    virtual bool Exists(std::span<const std::byte> key) const = 0;
+    virtual void WriteBatch(CDBBatch::WriteBatchImpl& batch, bool fSync) = 0;
+    virtual size_t EstimateSize(std::span<const std::byte> key1, std::span<const std::byte> key2) const = 0;
+    virtual std::unique_ptr<CDBBatch::WriteBatchImpl> NewBatch() const = 0;
+    virtual std::unique_ptr<CDBIterator::IteratorImpl> NewIterator() const = 0;
+    virtual void CompactFull() = 0;
+    virtual std::optional<std::string> GetProperty(const std::string& property) const = 0;
+    virtual size_t DynamicMemoryUsage() const = 0;
+};
+
+namespace {
+
+struct LevelDBContext final : DBContext {
     //! custom environment this database is using (may be nullptr in case of default environment)
-    leveldb::Env* penv;
+    leveldb::Env* penv{nullptr};
 
     //! database options used
     leveldb::Options options;
@@ -238,31 +274,43 @@ struct LevelDBContext {
     leveldb::WriteOptions syncoptions;
 
     //! the database itself
-    leveldb::DB* pdb;
+    leveldb::DB* pdb{nullptr};
+
+    explicit LevelDBContext(const DBParams& params);
+    ~LevelDBContext() override;
+
+    std::optional<std::string> Read(std::span<const std::byte> key) const override;
+    bool Exists(std::span<const std::byte> key) const override;
+    void WriteBatch(CDBBatch::WriteBatchImpl& batch, bool fSync) override;
+    size_t EstimateSize(std::span<const std::byte> key1, std::span<const std::byte> key2) const override;
+    std::unique_ptr<CDBBatch::WriteBatchImpl> NewBatch() const override;
+    std::unique_ptr<CDBIterator::IteratorImpl> NewIterator() const override;
+    void CompactFull() override;
+    std::optional<std::string> GetProperty(const std::string& property) const override;
+    size_t DynamicMemoryUsage() const override;
 };
 
-CDBWrapper::CDBWrapper(const DBParams& params)
-    : m_db_context{std::make_unique<LevelDBContext>()}, m_name{fs::PathToString(params.path.stem())}
+LevelDBContext::LevelDBContext(const DBParams& params)
 {
-    DBContext().penv = nullptr;
-    DBContext().readoptions.verify_checksums = true;
-    DBContext().iteroptions.verify_checksums = true;
-    DBContext().iteroptions.fill_cache = false;
-    DBContext().syncoptions.sync = true;
-    DBContext().options = GetOptions(params.cache_bytes, params.bloom_filter);
-    DBContext().options.create_if_missing = true;
-    DBContext().options.max_file_size = params.max_file_size;
+    penv = nullptr;
+    readoptions.verify_checksums = true;
+    iteroptions.verify_checksums = true;
+    iteroptions.fill_cache = false;
+    syncoptions.sync = true;
+    options = GetOptions(params.cache_bytes, params.bloom_filter);
+    options.create_if_missing = true;
+    options.max_file_size = params.max_file_size;
     assert(!(params.testing_env && params.memory_only));
     if (params.testing_env) {
-        DBContext().options.env = params.testing_env;
+        options.env = params.testing_env;
     } else if (params.memory_only) {
-        DBContext().penv = leveldb::NewMemEnv(leveldb::Env::Default());
-        DBContext().options.env = DBContext().penv;
+        penv = leveldb::NewMemEnv(leveldb::Env::Default());
+        options.env = penv;
     }
     if (!params.memory_only) {
         if (params.wipe_data) {
             LogInfo("Wiping LevelDB in %s", fs::PathToString(params.path));
-            leveldb::Status result = leveldb::DestroyDB(fs::PathToString(params.path), DBContext().options);
+            leveldb::Status result = leveldb::DestroyDB(fs::PathToString(params.path), options);
             HandleError(result);
         }
         if (!params.testing_env) {
@@ -274,7 +322,7 @@ CDBWrapper::CDBWrapper(const DBParams& params)
     // because on POSIX leveldb passes the byte string directly to ::open(), and
     // on Windows it converts from UTF-8 to UTF-16 before calling ::CreateFileW
     // (see env_posix.cc and env_windows.cc).
-    leveldb::Status status = leveldb::DB::Open(DBContext().options, fs::PathToString(params.path), &DBContext().pdb);
+    leveldb::Status status = leveldb::DB::Open(options, fs::PathToString(params.path), &pdb);
     HandleError(status);
     LogInfo("Opened LevelDB successfully");
 
@@ -283,7 +331,96 @@ CDBWrapper::CDBWrapper(const DBParams& params)
         CompactFull();
         LogInfo("Finished database compaction of %s", fs::PathToString(params.path));
     }
+}
 
+LevelDBContext::~LevelDBContext()
+{
+    delete pdb;
+    pdb = nullptr;
+    delete options.filter_policy;
+    options.filter_policy = nullptr;
+    delete options.info_log;
+    options.info_log = nullptr;
+    delete options.block_cache;
+    options.block_cache = nullptr;
+    delete penv;
+    options.env = nullptr;
+}
+
+void LevelDBContext::WriteBatch(CDBBatch::WriteBatchImpl& batch, bool fSync)
+{
+    auto& ldb_batch = static_cast<LevelDBBatchImpl&>(batch);
+    leveldb::Status status = pdb->Write(fSync ? syncoptions : writeoptions, &ldb_batch.batch);
+    HandleError(status);
+}
+
+std::optional<std::string> LevelDBContext::GetProperty(const std::string& property) const
+{
+    if (std::string value; pdb->GetProperty(property, &value)) return value;
+    return std::nullopt;
+}
+
+void LevelDBContext::CompactFull() { pdb->CompactRange(nullptr, nullptr); }
+
+size_t LevelDBContext::DynamicMemoryUsage() const
+{
+    std::optional<size_t> parsed;
+    if (auto memory{GetProperty("leveldb.approximate-memory-usage")}; !memory || !(parsed = ToIntegral<size_t>(*memory))) {
+        LogDebug(BCLog::LEVELDB, "Failed to get approximate-memory-usage property\n");
+        return 0;
+    }
+    return parsed.value();
+}
+
+std::optional<std::string> LevelDBContext::Read(std::span<const std::byte> key) const
+{
+    leveldb::Slice slKey(CharCast(key.data()), key.size());
+    std::string strValue;
+    leveldb::Status status = pdb->Get(readoptions, slKey, &strValue);
+    if (!status.ok()) {
+        if (status.IsNotFound())
+            return std::nullopt;
+        LogError("LevelDB read failure: %s", status.ToString());
+        HandleError(status);
+    }
+    return strValue;
+}
+
+bool LevelDBContext::Exists(std::span<const std::byte> key) const
+{
+    leveldb::Slice slKey(CharCast(key.data()), key.size());
+
+    std::string strValue;
+    leveldb::Status status = pdb->Get(readoptions, slKey, &strValue);
+    if (!status.ok()) {
+        if (status.IsNotFound())
+            return false;
+        LogError("LevelDB read failure: %s", status.ToString());
+        HandleError(status);
+    }
+    return true;
+}
+
+size_t LevelDBContext::EstimateSize(std::span<const std::byte> key1, std::span<const std::byte> key2) const
+{
+    leveldb::Slice slKey1(CharCast(key1.data()), key1.size());
+    leveldb::Slice slKey2(CharCast(key2.data()), key2.size());
+    uint64_t size = 0;
+    leveldb::Range range(slKey1, slKey2);
+    pdb->GetApproximateSizes(&range, 1, &size);
+    return size;
+}
+
+std::unique_ptr<CDBBatch::WriteBatchImpl> LevelDBContext::NewBatch() const
+{
+    return std::make_unique<LevelDBBatchImpl>();
+}
+
+} // namespace
+
+CDBWrapper::CDBWrapper(const DBParams& params)
+    : m_db_context{std::make_unique<LevelDBContext>(params)}, m_name{fs::PathToString(params.path.stem())}
+{
     if (!Read(OBFUSCATION_KEY, m_obfuscation) && params.obfuscate && IsEmpty()) {
         // Generate and write the new obfuscation key.
         const Obfuscation obfuscation{FastRandomContext{}.randbytes<Obfuscation::KEY_SIZE>()};
@@ -295,19 +432,7 @@ CDBWrapper::CDBWrapper(const DBParams& params)
     LogInfo("Using obfuscation key for %s: %s", fs::PathToString(params.path), m_obfuscation.HexKey());
 }
 
-CDBWrapper::~CDBWrapper()
-{
-    delete DBContext().pdb;
-    DBContext().pdb = nullptr;
-    delete DBContext().options.filter_policy;
-    DBContext().options.filter_policy = nullptr;
-    delete DBContext().options.info_log;
-    DBContext().options.info_log = nullptr;
-    delete DBContext().options.block_cache;
-    DBContext().options.block_cache = nullptr;
-    delete DBContext().penv;
-    DBContext().options.env = nullptr;
-}
+CDBWrapper::~CDBWrapper() = default;
 
 void CDBWrapper::WriteBatch(CDBBatch& batch, bool fSync)
 {
@@ -316,8 +441,7 @@ void CDBWrapper::WriteBatch(CDBBatch& batch, bool fSync)
     if (log_memory) {
         mem_before = DynamicMemoryUsage() / double(1_MiB);
     }
-    leveldb::Status status = DBContext().pdb->Write(fSync ? DBContext().syncoptions : DBContext().writeoptions, &batch.m_impl_batch->batch);
-    HandleError(status);
+    DBContext().WriteBatch(*batch.m_impl_batch, fSync);
     if (log_memory) {
         double mem_after{DynamicMemoryUsage() / double(1_MiB)};
         LogDebug(BCLog::LEVELDB, "WriteBatch memory usage: db=%s, before=%.1fMiB, after=%.1fMiB\n",
@@ -327,59 +451,29 @@ void CDBWrapper::WriteBatch(CDBBatch& batch, bool fSync)
 
 std::optional<std::string> CDBWrapper::GetProperty(const std::string& property) const
 {
-    if (std::string value; DBContext().pdb->GetProperty(property, &value)) return value;
-    return std::nullopt;
+    return DBContext().GetProperty(property);
 }
 
-void CDBWrapper::CompactFull() { DBContext().pdb->CompactRange(nullptr, nullptr); }
+void CDBWrapper::CompactFull() { DBContext().CompactFull(); }
 
 size_t CDBWrapper::DynamicMemoryUsage() const
 {
-    std::optional<size_t> parsed;
-    if (auto memory{GetProperty("leveldb.approximate-memory-usage")}; !memory || !(parsed = ToIntegral<size_t>(*memory))) {
-        LogDebug(BCLog::LEVELDB, "Failed to get approximate-memory-usage property\n");
-        return 0;
-    }
-    return parsed.value();
+    return DBContext().DynamicMemoryUsage();
 }
 
 std::optional<std::string> CDBWrapper::ReadImpl(std::span<const std::byte> key) const
 {
-    leveldb::Slice slKey(CharCast(key.data()), key.size());
-    std::string strValue;
-    leveldb::Status status = DBContext().pdb->Get(DBContext().readoptions, slKey, &strValue);
-    if (!status.ok()) {
-        if (status.IsNotFound())
-            return std::nullopt;
-        LogError("LevelDB read failure: %s", status.ToString());
-        HandleError(status);
-    }
-    return strValue;
+    return DBContext().Read(key);
 }
 
 bool CDBWrapper::ExistsImpl(std::span<const std::byte> key) const
 {
-    leveldb::Slice slKey(CharCast(key.data()), key.size());
-
-    std::string strValue;
-    leveldb::Status status = DBContext().pdb->Get(DBContext().readoptions, slKey, &strValue);
-    if (!status.ok()) {
-        if (status.IsNotFound())
-            return false;
-        LogError("LevelDB read failure: %s", status.ToString());
-        HandleError(status);
-    }
-    return true;
+    return DBContext().Exists(key);
 }
 
 size_t CDBWrapper::EstimateSizeImpl(std::span<const std::byte> key1, std::span<const std::byte> key2) const
 {
-    leveldb::Slice slKey1(CharCast(key1.data()), key1.size());
-    leveldb::Slice slKey2(CharCast(key2.data()), key2.size());
-    uint64_t size = 0;
-    leveldb::Range range(slKey1, slKey2);
-    DBContext().pdb->GetApproximateSizes(&range, 1, &size);
-    return size;
+    return DBContext().EstimateSize(key1, key2);
 }
 
 bool CDBWrapper::IsEmpty()
@@ -390,10 +484,40 @@ bool CDBWrapper::IsEmpty()
 }
 
 struct CDBIterator::IteratorImpl {
+    virtual ~IteratorImpl() = default;
+    virtual bool Valid() const = 0;
+    virtual void SeekToFirst() = 0;
+    virtual void Seek(std::span<const std::byte> key) = 0;
+    virtual void Next() = 0;
+    virtual std::span<const std::byte> GetKey() const = 0;
+    virtual std::span<const std::byte> GetValue() const = 0;
+};
+
+namespace {
+
+struct LevelDBIteratorImpl final : CDBIterator::IteratorImpl {
     const std::unique_ptr<leveldb::Iterator> iter;
 
-    explicit IteratorImpl(leveldb::Iterator* _iter) : iter{_iter} {}
+    explicit LevelDBIteratorImpl(leveldb::Iterator* _iter) : iter{_iter} {}
+
+    bool Valid() const override { return iter->Valid(); }
+    void SeekToFirst() override { iter->SeekToFirst(); }
+    void Seek(std::span<const std::byte> key) override
+    {
+        leveldb::Slice slKey(CharCast(key.data()), key.size());
+        iter->Seek(slKey);
+    }
+    void Next() override { iter->Next(); }
+    std::span<const std::byte> GetKey() const override { return MakeByteSpan(iter->key()); }
+    std::span<const std::byte> GetValue() const override { return MakeByteSpan(iter->value()); }
 };
+
+std::unique_ptr<CDBIterator::IteratorImpl> LevelDBContext::NewIterator() const
+{
+    return std::make_unique<LevelDBIteratorImpl>(pdb->NewIterator(iteroptions));
+}
+
+} // namespace
 
 CDBIterator::CDBIterator(const CDBWrapper& _parent, std::unique_ptr<IteratorImpl> _piter) : parent(_parent),
                                                                                             m_impl_iter(std::move(_piter))
@@ -403,31 +527,30 @@ CDBIterator::CDBIterator(const CDBWrapper& _parent, std::unique_ptr<IteratorImpl
 
 CDBIterator* CDBWrapper::NewIterator()
 {
-    return new CDBIterator{*this, std::make_unique<CDBIterator::IteratorImpl>(DBContext().pdb->NewIterator(DBContext().iteroptions))};
+    return new CDBIterator{*this, DBContext().NewIterator()};
 }
 
 void CDBIterator::SeekImpl(std::span<const std::byte> key)
 {
-    leveldb::Slice slKey(CharCast(key.data()), key.size());
-    m_impl_iter->iter->Seek(slKey);
+    m_impl_iter->Seek(key);
 }
 
 std::span<const std::byte> CDBIterator::GetKeyImpl() const
 {
     // The returned span borrows from the current iterator entry and is only
     // valid until the iterator is advanced.
-    return MakeByteSpan(m_impl_iter->iter->key());
+    return m_impl_iter->GetKey();
 }
 
 std::span<const std::byte> CDBIterator::GetValueImpl() const
 {
-    return MakeByteSpan(m_impl_iter->iter->value());
+    return m_impl_iter->GetValue();
 }
 
 CDBIterator::~CDBIterator() = default;
-bool CDBIterator::Valid() const { return m_impl_iter->iter->Valid(); }
-void CDBIterator::SeekToFirst() { m_impl_iter->iter->SeekToFirst(); }
-void CDBIterator::Next() { m_impl_iter->iter->Next(); }
+bool CDBIterator::Valid() const { return m_impl_iter->Valid(); }
+void CDBIterator::SeekToFirst() { m_impl_iter->SeekToFirst(); }
+void CDBIterator::Next() { m_impl_iter->Next(); }
 
 namespace dbwrapper_private {
 
