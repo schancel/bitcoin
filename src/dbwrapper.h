@@ -90,10 +90,11 @@ class CDBBatch
 {
     friend class CDBWrapper;
 
+public:
+    struct WriteBatchImpl;
+
 private:
     const CDBWrapper &parent;
-
-    struct WriteBatchImpl;
     const std::unique_ptr<WriteBatchImpl> m_impl_batch;
 
     DataStream m_key_scratch{};
@@ -188,14 +189,15 @@ public:
     }
 };
 
-struct LevelDBContext;
+struct DBContext;
 
 class CDBWrapper
 {
     friend const Obfuscation& dbwrapper_private::GetObfuscation(const CDBWrapper&);
+    friend class CDBBatch;
 private:
-    //! holds all leveldb-specific fields of this class
-    util::NotNullUniquePtr<LevelDBContext> m_db_context;
+    //! holds the concrete storage backend implementation allocated on construction
+    util::NotNullUniquePtr<DBContext> m_db_context;
 
     //! the name of this database
     std::string m_name;
