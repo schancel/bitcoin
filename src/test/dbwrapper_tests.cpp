@@ -558,5 +558,49 @@ BOOST_AUTO_TEST_CASE(unicodepath)
     BOOST_CHECK(fs::exists(lockPath));
 }
 
+BOOST_AUTO_TEST_CASE(mdbx_backend_and_migration)
+{
+    const fs::path ph = m_args.GetDataDirBase() / "mdbx_backend_and_migration";
+    const uint256 v1 = m_rng.rand256();
+    const uint256 v2 = m_rng.rand256();
+    constexpr uint8_t k1{'k'};
+    constexpr uint8_t k2{'m'};
+
+    // 1. Populate with LevelDB
+    {
+        CDBWrapper dbw({.path = ph, .cache_bytes = 1_MiB, .memory_only = false, .wipe_data = true, .obfuscate = true, .backend = DBBackend::LEVELDB});
+        dbw.Write(k1, v1);
+    }
+    BOOST_CHECK(fs::exists(ph / "CURRENT"));
+    BOOST_CHECK(!fs::exists(ph / "mdbx.dat"));
+    BOOST_CHECK(CDBWrapper::HasKeyStartingWith(ph, k1));
+
+    // 2. Open with MDBX -> auto-migrates from LevelDB and moves old files to leveldb.bak/
+    {
+        CDBWrapper dbw({.path = ph, .cache_bytes = 1_MiB, .memory_only = false, .wipe_data = false, .obfuscate = true, .backend = DBBackend::MDBX});
+        uint256 res;
+        BOOST_CHECK(dbw.Read(k1, res));
+        BOOST_CHECK_EQUAL(res.ToString(), v1.ToString());
+        dbw.Write(k2, v2);
+    }
+    BOOST_CHECK(!fs::exists(ph / "CURRENT"));
+    BOOST_CHECK(fs::exists(ph / "leveldb.bak" / "CURRENT"));
+    BOOST_CHECK(fs::exists(ph / "mdbx.dat"));
+    BOOST_CHECK(CDBWrapper::HasKeyStartingWith(ph, k2));
+
+    // 3. Reopen with LevelDB -> auto-migrates back from MDBX and moves mdbx.dat to mdbx.bak/
+    {
+        CDBWrapper dbw({.path = ph, .cache_bytes = 1_MiB, .memory_only = false, .wipe_data = false, .obfuscate = true, .backend = DBBackend::LEVELDB});
+        uint256 res1, res2;
+        BOOST_CHECK(dbw.Read(k1, res1));
+        BOOST_CHECK_EQUAL(res1.ToString(), v1.ToString());
+        BOOST_CHECK(dbw.Read(k2, res2));
+        BOOST_CHECK_EQUAL(res2.ToString(), v2.ToString());
+    }
+    BOOST_CHECK(fs::exists(ph / "CURRENT"));
+    BOOST_CHECK(!fs::exists(ph / "mdbx.dat"));
+    BOOST_CHECK(fs::exists(ph / "mdbx.bak" / "mdbx.dat"));
+    BOOST_CHECK(CDBWrapper::HasKeyStartingWith(ph, k2));
+}
 
 BOOST_AUTO_TEST_SUITE_END()

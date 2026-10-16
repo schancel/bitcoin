@@ -33,6 +33,18 @@ inline constexpr size_t DBWRAPPER_PREALLOC_KEY_SIZE = 64;
 inline constexpr size_t DBWRAPPER_PREALLOC_VALUE_SIZE = 1024;
 inline constexpr size_t DBWRAPPER_MAX_FILE_SIZE{32_MiB};
 
+//! Storage engine backend for CDBWrapper.
+enum class DBBackend {
+    LEVELDB,
+    MDBX,
+};
+
+//! Set the process-wide default storage backend for CDBWrapper instances that
+//! do not explicitly specify DBParams::backend (called once during startup).
+void SetDefaultDBBackend(DBBackend backend) noexcept;
+DBBackend GetDefaultDBBackend() noexcept;
+std::optional<DBBackend> ParseDBBackend(std::string_view name) noexcept;
+
 //! User-controlled performance and debug options.
 struct DBOptions {
     //! Compact database on startup.
@@ -41,11 +53,11 @@ struct DBOptions {
 
 //! Application-specific storage settings.
 struct DBParams {
-    //! Location in the filesystem where leveldb data will be stored.
+    //! Location in the filesystem where database data will be stored.
     fs::path path;
-    //! Configures various leveldb cache settings.
+    //! Configures various database cache settings.
     uint64_t cache_bytes;
-    //! If true, use leveldb's memory environment.
+    //! If true, use an in-memory database environment.
     bool memory_only = false;
     //! If true, remove all existing data.
     bool wipe_data = false;
@@ -62,6 +74,8 @@ struct DBParams {
     //! Maximum LevelDB SST file size. Larger values reduce the frequency
     //! of compactions but increase their duration.
     size_t max_file_size = DBWRAPPER_MAX_FILE_SIZE;
+    //! Optional override for the storage backend; defaults to GetDefaultDBBackend().
+    std::optional<DBBackend> backend = std::nullopt;
 };
 
 class dbwrapper_error : public std::runtime_error
