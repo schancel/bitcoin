@@ -522,6 +522,7 @@ void SetupServerArgs(ArgsManager& argsman, bool can_listen_ipc)
     argsman.AddArg("-coinstatsindex", strprintf("Maintain coinstats index used by the gettxoutsetinfo RPC (default: %u)", DEFAULT_COINSTATSINDEX), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-conf=<file>", strprintf("Specify path to read-only configuration file. Relative paths will be prefixed by datadir location (only useable from command line, not configuration file) (default: %s)", BITCOIN_CONF_FILENAME), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-datadir=<dir>", "Specify data directory", ArgsManager::ALLOW_ANY | ArgsManager::DISALLOW_NEGATION, OptionsCategory::OPTIONS);
+    argsman.AddArg("-dbbackend=<backend>", "Database storage backend to use: 'leveldb' or 'mdbx' (default: leveldb)", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-dbbatchsize", strprintf("Maximum database write batch size in bytes (default: %u)", DEFAULT_DB_CACHE_BATCH), ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::OPTIONS);
     argsman.AddArg("-dbcache=<n>", strprintf("Maximum database cache size <n> MiB (minimum %d, default: %d). Make sure you have enough RAM. In addition, unused memory allocated to the mempool is shared with this cache (see -maxmempool).", MIN_DBCACHE_BYTES / 1_MiB, node::GetDefaultDBCache() / 1_MiB), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-includeconf=<file>", "Specify additional configuration file, relative to the -datadir path (only useable from configuration file, not command line)", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
@@ -1162,6 +1163,13 @@ bool AppInitParameterInteraction(const ArgsManager& args)
     // ********************************************************* Step 3: parameter-to-internal-flags
     if (auto result{init::SetLoggingCategories(args)}; !result) return InitError(util::ErrorString(result));
     if (auto result{init::SetLoggingLevel(args)}; !result) return InitError(util::ErrorString(result));
+
+    const std::string dbbackend_str = args.GetArg("-dbbackend", "leveldb");
+    const std::optional<DBBackend> dbbackend = ParseDBBackend(dbbackend_str);
+    if (!dbbackend) {
+        return InitError(strprintf(_("Invalid -dbbackend '%s' (must be 'leveldb' or 'mdbx')"), dbbackend_str));
+    }
+    SetDefaultDBBackend(*dbbackend);
 
     nConnectTimeout = args.GetIntArg("-timeout", DEFAULT_CONNECT_TIMEOUT);
     if (nConnectTimeout <= 0) {

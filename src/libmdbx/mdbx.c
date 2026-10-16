@@ -9907,8 +9907,8 @@ __cold static pgno_t default_rp_augment_limit(const MDBX_env *env) {
 }
 
 static bool default_prefault_write(const MDBX_env *env) {
-  return !MDBX_MMAP_INCOHERENT_FILE_WRITE && !env->incore &&
-         (env->flags & (MDBX_WRITEMAP | MDBX_RDONLY)) == MDBX_WRITEMAP;
+  (void)env;
+  return false;
 }
 
 static bool default_prefer_waf_insteadof_balance(const MDBX_env *env) {
@@ -25235,7 +25235,7 @@ __cold static void mdbx_init(void) {
                           (getenv_bool("MDBX_DBG_LEGACY_MULTIOPEN", false) ? MDBX_DBG_LEGACY_MULTIOPEN : 0) |
                           (getenv_bool("MDBX_DBG_LEGACY_OVERLAP", false) ? MDBX_DBG_LEGACY_OVERLAP : 0) |
                           (getenv_bool("MDBX_DBG_DONT_UPGRADE", false) ? MDBX_DBG_DONT_UPGRADE : 0);
-  globals.loglevel = MDBX_LOG_NOTICE;
+  globals.loglevel = MDBX_LOG_FATAL;
   ENSURE(osal_fastmutex_init(&globals.debug_lock) == 0);
   osal_ctor();
   ASSERT(globals.sys_pagesize > 0 && (globals.sys_pagesize & (globals.sys_pagesize - 1)) == 0);
@@ -28138,12 +28138,15 @@ __cold int meta_wipe_steady(MDBX_env *env, txnid_t inclusive_upto) {
     err = meta_unsteady(env, inclusive_upto, 2);
   }
 
-  if (err == MDBX_RESULT_TRUE || wiped) {
+  if ((err == MDBX_RESULT_TRUE || wiped) &&
+      !F_ISSET(env->flags, MDBX_NOMETASYNC | MDBX_SAFE_NOSYNC | MDBX_UTTERLY_NOSYNC)) {
     err = MDBX_SUCCESS;
     if (!MDBX_AVOID_MSYNC && (env->flags & MDBX_WRITEMAP))
       err = dxb_msync(env, NUM_METAS, MDBX_SYNC_DATA | MDBX_SYNC_IODQ);
     else if (env->fd4meta == env->lazy_fd)
       err = dxb_fsync(env, MDBX_SYNC_DATA | MDBX_SYNC_IODQ);
+  } else if (err == MDBX_RESULT_TRUE || wiped) {
+    err = MDBX_SUCCESS;
   }
 
   osal_flush_incoherent_mmap(env->dxb_mmap.base, pgno2bytes(env, NUM_METAS), globals.sys_pagesize);
@@ -32885,12 +32888,12 @@ __cold int mdbx_get_sysraminfo(intptr_t *page_size, intptr_t *total_pages, intpt
 #elif defined(HW_USERMEM) || defined(HW_PHYSMEM64) || defined(HW_MEMSIZE) || defined(HW_PHYSMEM)
     size_t ram, len = sizeof(ram);
     static const int mib[] = {CTL_HW,
-#if defined(HW_USERMEM)
-                              HW_USERMEM
+#if defined(HW_MEMSIZE)
+                              HW_MEMSIZE
 #elif defined(HW_PHYSMEM64)
                               HW_PHYSMEM64
-#elif defined(HW_MEMSIZE)
-                              HW_MEMSIZE
+#elif defined(HW_USERMEM)
+                              HW_USERMEM
 #else
                               HW_PHYSMEM
 #endif
@@ -32921,13 +32924,14 @@ __cold int mdbx_get_sysraminfo(intptr_t *page_size, intptr_t *total_pages, intpt
     if (avail_ram_pages == -1)
       return LOG_IFERR(errno);
 #elif defined(__MACH__)
-    mach_msg_type_number_t count = HOST_VM_INFO_COUNT;
     mach_port_t mport = mach_host_self();
 #if defined(__ENVIRONMENT_MAC_OS_X_VERSION_MIN_REQUIRED__) && __ENVIRONMENT_MAC_OS_X_VERSION_MIN_REQUIRED__ >= 100600
+    mach_msg_type_number_t count = HOST_VM_INFO64_COUNT;
     struct vm_statistics64 vmstat;
     kern_return_t kerr = host_statistics64(mport, HOST_VM_INFO64, (host_info64_t)&vmstat, &count);
     const intptr_t avail_ram_pages = vmstat.free_count + vmstat.purgeable_count;
 #else
+    mach_msg_type_number_t count = HOST_VM_INFO_COUNT;
     vm_statistics_data_t vmstat;
     kern_return_t kerr = host_statistics(mport, HOST_VM_INFO, (host_info_t)&vmstat, &count);
     const intptr_t avail_ram_pages = vmstat.free_count;

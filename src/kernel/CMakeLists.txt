@@ -80,6 +80,7 @@ add_library(bitcoinkernel
   $<TARGET_OBJECTS:bitcoin_clientversion>
   $<TARGET_OBJECTS:bitcoin_crypto>
   $<TARGET_OBJECTS:leveldb>
+  $<TARGET_OBJECTS:mdbx>
   $<TARGET_OBJECTS:crc32c>
 )
 
@@ -107,7 +108,10 @@ target_link_libraries(bitcoinkernel
     Boost::headers
 )
 
-target_include_directories(bitcoinkernel PRIVATE $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/src/leveldb/include>)
+target_include_directories(bitcoinkernel PRIVATE
+  $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/src/leveldb/include>
+  $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/src/libmdbx>
+)
 
 # Add a convenience libbitcoinkernel target as a synonym for bitcoinkernel.
 add_custom_target(libbitcoinkernel)
