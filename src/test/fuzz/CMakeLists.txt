@@ -158,6 +158,7 @@ target_link_libraries(fuzz
   bitcoin_util
   minisketch
   leveldb
+  mdbx
   univalue
   secp256k1
   Boost::headers

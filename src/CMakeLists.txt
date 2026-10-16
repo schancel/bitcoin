@@ -17,6 +17,7 @@ include_directories(${CMAKE_CURRENT_BINARY_DIR} ${CMAKE_CURRENT_SOURCE_DIR})
 # not overridden.
 include(../cmake/crc32c.cmake)
 include(../cmake/leveldb.cmake)
+include(../cmake/libmdbx.cmake)
 include(../cmake/minisketch.cmake)
 add_subdirectory(univalue)
 if (ENABLE_IPC AND NOT WITH_EXTERNAL_LIBMULTIPROCESS)
@@ -292,6 +293,7 @@ target_link_libraries(bitcoin_node
     bitcoin_util
     $<TARGET_NAME_IF_EXISTS:bitcoin_zmq>
     leveldb
+    mdbx
     minisketch
     univalue
     $<TARGET_NAME_IF_EXISTS:Boost::headers>
